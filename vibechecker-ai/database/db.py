@@ -1,33 +1,32 @@
-"""
-VibeChecker AI — Database Helper Functions
-This is the module the backend team (Zem) imports to interact with the database.
-No raw SQL needed — just call these functions.
+"""Database helpers the backend imports.
 
 Usage:
     from db import create_user, create_checkin, get_user_history, ...
+
+All functions that fetch or create records return ORM objects.
+Call .to_dict() on any object to get a JSON-safe dict for API responses.
 """
 
 import json
+from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 from models import get_db, User, Checkin, EmotionResult, SeasonalSummary, now_iso
 
+DEPRESSION_THRESHOLD = 0.3  # avg sadness above this triggers depression_flag = 1
 
-# ═══════════════════════════════════════════════════════════
-# USER OPERATIONS
-# ═══════════════════════════════════════════════════════════
+
+# ── Users ───────────────────────────────────────────────────
 
 def create_user(username: str, email: str, password_hash: str, tz: str = "UTC") -> User:
-    """
-    Create a new user account.
-    NOTE: Hash the password with bcrypt BEFORE calling this function.
-    """
+    """Create a user. password_hash must be a bcrypt hash (starts with '$2b$')."""
+    if not password_hash.startswith("$2b$"):
+        raise ValueError(
+            "password_hash must be a bcrypt hash. "
+            "Use bcrypt.hashpw(password.encode(), bcrypt.gensalt()) before calling create_user()."
+        )
     db = get_db()
     try:
-        user = User(
-            username=username,
-            email=email,
-            password_hash=password_hash,
-            timezone=tz,
-        )
+        user = User(username=username, email=email, password_hash=password_hash, timezone=tz)
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -37,7 +36,6 @@ def create_user(username: str, email: str, password_hash: str, tz: str = "UTC") 
 
 
 def get_user_by_email(email: str) -> User | None:
-    """Look up a user by email (for login)."""
     db = get_db()
     try:
         return db.query(User).filter(User.email == email).first()
@@ -46,7 +44,6 @@ def get_user_by_email(email: str) -> User | None:
 
 
 def get_user_by_id(user_id: int) -> User | None:
-    """Look up a user by ID."""
     db = get_db()
     try:
         return db.query(User).filter(User.user_id == user_id).first()
@@ -54,16 +51,11 @@ def get_user_by_id(user_id: int) -> User | None:
         db.close()
 
 
-# ═══════════════════════════════════════════════════════════
-# CHECK-IN OPERATIONS
-# ═══════════════════════════════════════════════════════════
+# ── Check-ins ───────────────────────────────────────────────
 
 def create_checkin(user_id: int, image_path: str, captured_at: str,
                    season: str, season_year: int) -> Checkin:
-    """
-    Record a new daily check-in (one per selfie upload).
-    Returns the created Checkin object with its checkin_id.
-    """
+    """Record a daily selfie upload."""
     db = get_db()
     try:
         checkin = Checkin(
@@ -81,17 +73,12 @@ def create_checkin(user_id: int, image_path: str, captured_at: str,
         db.close()
 
 
-# ═══════════════════════════════════════════════════════════
-# EMOTION RESULT OPERATIONS
-# ═══════════════════════════════════════════════════════════
+# ── Emotion results ─────────────────────────────────────────
 
 def store_emotion_result(checkin_id: int, predicted_emotion: str,
                          confidence: float, scores: dict,
                          model_version: str = "v1.0") -> EmotionResult:
-    """
-    Store the model's prediction for a check-in.
-    `scores` should be a dict like {"happy": 0.7, "sad": 0.1, ...}
-    """
+    """Save the model's prediction for one check-in."""
     db = get_db()
     try:
         result = EmotionResult(
@@ -109,20 +96,16 @@ def store_emotion_result(checkin_id: int, predicted_emotion: str,
         db.close()
 
 
-# ═══════════════════════════════════════════════════════════
-# QUERY OPERATIONS (for dashboard and history)
-# ═══════════════════════════════════════════════════════════
+# ── Queries for dashboard + history ─────────────────────────
 
-def get_user_history(user_id: int, season: str, season_year: int) -> list[dict]:
-    """
-    Get all check-ins + emotion results for a user in a given season.
-    Returns a list of dicts ready for the frontend.
-    """
+def get_user_history(user_id: int, season: str, season_year: int) -> list[Checkin]:
+    """All check-ins for a user in one season with emotion_result eager-loaded.
+    Checkins without a prediction yet will have .emotion_result = None."""
     db = get_db()
     try:
-        results = (
-            db.query(Checkin, EmotionResult)
-            .join(EmotionResult, Checkin.checkin_id == EmotionResult.checkin_id)
+        return (
+            db.query(Checkin)
+            .options(joinedload(Checkin.emotion_result))
             .filter(
                 Checkin.user_id == user_id,
                 Checkin.season == season,
@@ -131,26 +114,46 @@ def get_user_history(user_id: int, season: str, season_year: int) -> list[dict]:
             .order_by(Checkin.captured_at.asc())
             .all()
         )
+    finally:
+        db.close()
+
+
+def get_weekly_sadness_trend(user_id: int, season: str, season_year: int) -> list[dict]:
+    """Week-by-week average sadness for a season. Used for frontend trend charts.
+
+    Returns a list like: [{"week": "2026-01", "avg_sadness": 0.23}, ...]
+    Week format is YYYY-WW (ISO year + week number).
+    """
+    db = get_db()
+    try:
+        week_col = func.strftime("%Y-%W", Checkin.captured_at).label("week")
+        avg_sad_col = func.avg(
+            func.json_extract(EmotionResult.scores_json, "$.sad")
+        ).label("avg_sadness")
+
+        results = (
+            db.query(week_col, avg_sad_col)
+            .join(EmotionResult, Checkin.checkin_id == EmotionResult.checkin_id)
+            .filter(
+                Checkin.user_id == user_id,
+                Checkin.season == season,
+                Checkin.season_year == season_year,
+            )
+            .group_by(week_col)
+            .order_by(week_col.asc())
+            .all()
+        )
 
         return [
-            {
-                "date": checkin.captured_at,
-                "emotion": result.predicted_emotion,
-                "confidence": result.confidence,
-                "scores": json.loads(result.scores_json) if result.scores_json else {},
-                "image_path": checkin.image_path,
-            }
-            for checkin, result in results
+            {"week": row.week, "avg_sadness": round(row.avg_sadness, 4)}
+            for row in results
         ]
     finally:
         db.close()
 
 
 def get_emotion_counts(user_id: int, season: str, season_year: int) -> dict:
-    """
-    Count occurrences of each emotion for a season.
-    Returns: {"happy": 25, "sad": 10, "neutral": 40, ...}
-    """
+    """How many times each emotion appeared in a season."""
     db = get_db()
     try:
         results = (
@@ -173,7 +176,7 @@ def get_emotion_counts(user_id: int, season: str, season_year: int) -> dict:
 
 
 def get_dominant_emotion(user_id: int, season: str, season_year: int) -> str | None:
-    """Get the most frequent emotion for a user in a given season."""
+    """Most frequent emotion for a season."""
     counts = get_emotion_counts(user_id, season, season_year)
     if not counts:
         return None
@@ -181,10 +184,7 @@ def get_dominant_emotion(user_id: int, season: str, season_year: int) -> str | N
 
 
 def get_average_scores(user_id: int, season: str, season_year: int) -> dict:
-    """
-    Calculate average score for each emotion across a season.
-    Returns: {"happy": 0.23, "sad": 0.31, ...}
-    """
+    """Average score per emotion across a season."""
     db = get_db()
     try:
         results = (
@@ -201,7 +201,6 @@ def get_average_scores(user_id: int, season: str, season_year: int) -> dict:
         if not results:
             return {}
 
-        # Accumulate scores
         totals = {}
         count = 0
         for (scores_json,) in results:
@@ -211,7 +210,6 @@ def get_average_scores(user_id: int, season: str, season_year: int) -> dict:
                     totals[emotion] = totals.get(emotion, 0) + score
                 count += 1
 
-        # Average them
         if count == 0:
             return {}
         return {emotion: round(total / count, 4) for emotion, total in totals.items()}
@@ -219,15 +217,10 @@ def get_average_scores(user_id: int, season: str, season_year: int) -> dict:
         db.close()
 
 
-# ═══════════════════════════════════════════════════════════
-# SEASONAL SUMMARY OPERATIONS
-# ═══════════════════════════════════════════════════════════
+# ── Seasonal summaries ──────────────────────────────────────
 
 def update_seasonal_summary(user_id: int, season: str, season_year: int) -> SeasonalSummary:
-    """
-    Recalculate and store the seasonal summary for a user.
-    Call this after new check-ins are added, or on a schedule.
-    """
+    """Recompute and upsert the seasonal summary for a user."""
     db = get_db()
     try:
         avg_scores = get_average_scores(user_id, season, season_year)
@@ -235,11 +228,9 @@ def update_seasonal_summary(user_id: int, season: str, season_year: int) -> Seas
         total = sum(counts.values())
         dominant = max(counts, key=counts.get) if counts else None
 
-        # Flag depression if average sadness is above threshold
         avg_sadness = avg_scores.get("sad", 0)
-        depression_flag = 1 if avg_sadness > 0.3 else 0  # Threshold is adjustable
+        depression_flag = 1 if avg_sadness > DEPRESSION_THRESHOLD else 0
 
-        # Update existing or create new
         summary = (
             db.query(SeasonalSummary)
             .filter(

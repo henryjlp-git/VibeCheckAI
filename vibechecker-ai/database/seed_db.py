@@ -1,49 +1,38 @@
-"""
-VibeChecker AI — Seed Database with Sample Data
-Run this after init_db.py to populate the database with fake test data.
-
-Usage:
-    python seed_db.py
-"""
+"""Populate vibechecker.db with fake users and check-ins for testing."""
 
 import json
 import random
 from datetime import datetime, timedelta
 from models import get_db, User, Checkin, EmotionResult, SeasonalSummary
 
-# ── Emotion categories (matches FER2013) ────────────────────
-EMOTIONS = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
+EMOTIONS = ["angry", "fear", "happy", "neutral", "sad", "surprise"]
 
 
 def random_scores():
-    """Generate a random emotion score breakdown that sums to ~1.0."""
+    """Random normalized emotion scores that sum to ~1.0."""
     raw = [random.random() for _ in EMOTIONS]
     total = sum(raw)
     return {emotion: round(score / total, 3) for emotion, score in zip(EMOTIONS, raw)}
 
 
 def get_season(month):
-    """Determine season from month number."""
     if month in (12, 1, 2):
         return "winter"
-    elif month in (3, 4, 5):
+    if month in (3, 4, 5):
         return "spring"
-    elif month in (6, 7, 8):
+    if month in (6, 7, 8):
         return "summer"
-    else:
-        return "fall"
+    return "fall"
 
 
 def seed():
     db = get_db()
-
     try:
-        # ── Create sample users ─────────────────────────────
         users = [
             User(
                 username="Javaya",
                 email="javaya@example.com",
-                password_hash="hashed_password_placeholder_1",  # In production, use bcrypt
+                password_hash="hashed_password_placeholder_1",  # use bcrypt in real code
                 timezone="America/Los_Angeles",
             ),
             User(
@@ -57,15 +46,15 @@ def seed():
         db.commit()
         print(f"Created {len(users)} users")
 
-        # ── Create check-ins for winter 2026 (Dec 2025 - Feb 2026) ──
+        # Winter 2026 = Dec 2025 through Feb 2026
         start_date = datetime(2025, 12, 1)
         checkin_count = 0
 
         for user in users:
-            for day_offset in range(90):  # ~3 months of daily check-ins
+            for day_offset in range(90):
                 date = start_date + timedelta(days=day_offset)
 
-                # Skip some days randomly (realistic — users won't check in every day)
+                # skip ~15% of days so it isn't perfectly daily
                 if random.random() < 0.15:
                     continue
 
@@ -80,7 +69,7 @@ def seed():
                     season_year=2026 if date.month <= 2 else 2025,
                 )
                 db.add(checkin)
-                db.flush()  # Get the checkin_id before creating the emotion result
+                db.flush()  # need checkin_id for the FK below
 
                 result = EmotionResult(
                     checkin_id=checkin.checkin_id,
@@ -95,12 +84,11 @@ def seed():
         db.commit()
         print(f"Created {checkin_count} check-ins with emotion results")
 
-        # ── Create a sample seasonal summary ────────────────
         summary = SeasonalSummary(
             user_id=users[0].user_id,
             season="winter",
             season_year=2026,
-            total_checkins=checkin_count // 2,  # Roughly half belong to first user
+            total_checkins=checkin_count // 2,
             avg_happiness=0.18,
             avg_sadness=0.22,
             dominant_emotion="neutral",
@@ -109,9 +97,8 @@ def seed():
         db.add(summary)
         db.commit()
         print("Created 1 seasonal summary")
-
         print()
-        print("Seed complete! Your database is ready for testing.")
+        print("Seed complete.")
 
     except Exception as e:
         db.rollback()

@@ -1,2 +1,5 @@
 sqlalchemy>=2.0
 bcrypt
+numpy
+pillow
+tqdm
