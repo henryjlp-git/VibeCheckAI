@@ -15,6 +15,19 @@ from models import get_db, User, Checkin, EmotionResult, SeasonalSummary, now_is
 DEPRESSION_THRESHOLD = 0.3  # avg sadness above this triggers depression_flag = 1
 
 
+# ── Season helper ───────────────────────────────────────────
+
+def get_season(month: int) -> str:
+    """Map a month number (1–12) to a season name."""
+    if month in (12, 1, 2):
+        return "winter"
+    if month in (3, 4, 5):
+        return "spring"
+    if month in (6, 7, 8):
+        return "summer"
+    return "fall"
+
+
 # ── Users ───────────────────────────────────────────────────
 
 def create_user(username: str, email: str, password_hash: str, tz: str = "UTC") -> User:
@@ -78,15 +91,28 @@ def create_checkin(user_id: int, image_path: str, captured_at: str,
 def store_emotion_result(checkin_id: int, predicted_emotion: str,
                          confidence: float, scores: dict,
                          model_version: str = "v1.0") -> EmotionResult:
-    """Save the model's prediction for one check-in."""
+    """Save a new prediction for a check-in.
+    If a previous prediction exists, it is demoted to is_latest=0 (kept as history)
+    and the new one is inserted with is_latest=1."""
     db = get_db()
     try:
+        # Demote any currently-latest result for this checkin.
+        (
+            db.query(EmotionResult)
+            .filter(
+                EmotionResult.checkin_id == checkin_id,
+                EmotionResult.is_latest == 1,
+            )
+            .update({"is_latest": 0})
+        )
+
         result = EmotionResult(
             checkin_id=checkin_id,
             predicted_emotion=predicted_emotion,
             confidence=confidence,
             scores_json=json.dumps(scores),
             model_version=model_version,
+            is_latest=1,
         )
         db.add(result)
         db.commit()
@@ -96,16 +122,31 @@ def store_emotion_result(checkin_id: int, predicted_emotion: str,
         db.close()
 
 
+def get_emotion_result_history(checkin_id: int) -> list[EmotionResult]:
+    """All predictions ever made for one check-in, newest first.
+    Useful for comparing what different model versions predicted on the same selfie."""
+    db = get_db()
+    try:
+        return (
+            db.query(EmotionResult)
+            .filter(EmotionResult.checkin_id == checkin_id)
+            .order_by(EmotionResult.processed_at.desc())
+            .all()
+        )
+    finally:
+        db.close()
+
+
 # ── Queries for dashboard + history ─────────────────────────
 
 def get_user_history(user_id: int, season: str, season_year: int) -> list[Checkin]:
-    """All check-ins for a user in one season with emotion_result eager-loaded.
-    Checkins without a prediction yet will have .emotion_result = None."""
+    """All check-ins for a user in one season with latest_result eager-loaded.
+    Checkins without any prediction yet will have .latest_result = None."""
     db = get_db()
     try:
         return (
             db.query(Checkin)
-            .options(joinedload(Checkin.emotion_result))
+            .options(joinedload(Checkin.latest_result))
             .filter(
                 Checkin.user_id == user_id,
                 Checkin.season == season,
@@ -121,8 +162,9 @@ def get_user_history(user_id: int, season: str, season_year: int) -> list[Checki
 def get_weekly_sadness_trend(user_id: int, season: str, season_year: int) -> list[dict]:
     """Week-by-week average sadness for a season. Used for frontend trend charts.
 
-    Returns a list like: [{"week": "2026-01", "avg_sadness": 0.23}, ...]
+    Returns: [{"week": "2026-01", "avg_sadness": 0.23}, ...]
     Week format is YYYY-WW (ISO year + week number).
+    Only the latest prediction per check-in is counted.
     """
     db = get_db()
     try:
@@ -138,6 +180,7 @@ def get_weekly_sadness_trend(user_id: int, season: str, season_year: int) -> lis
                 Checkin.user_id == user_id,
                 Checkin.season == season,
                 Checkin.season_year == season_year,
+                EmotionResult.is_latest == 1,
             )
             .group_by(week_col)
             .order_by(week_col.asc())
@@ -153,7 +196,7 @@ def get_weekly_sadness_trend(user_id: int, season: str, season_year: int) -> lis
 
 
 def get_emotion_counts(user_id: int, season: str, season_year: int) -> dict:
-    """How many times each emotion appeared in a season."""
+    """How many times each emotion appeared in a season (latest predictions only)."""
     db = get_db()
     try:
         results = (
@@ -163,6 +206,7 @@ def get_emotion_counts(user_id: int, season: str, season_year: int) -> dict:
                 Checkin.user_id == user_id,
                 Checkin.season == season,
                 Checkin.season_year == season_year,
+                EmotionResult.is_latest == 1,
             )
             .all()
         )
@@ -184,7 +228,7 @@ def get_dominant_emotion(user_id: int, season: str, season_year: int) -> str | N
 
 
 def get_average_scores(user_id: int, season: str, season_year: int) -> dict:
-    """Average score per emotion across a season."""
+    """Average score per emotion across a season (latest predictions only)."""
     db = get_db()
     try:
         results = (
@@ -194,6 +238,7 @@ def get_average_scores(user_id: int, season: str, season_year: int) -> dict:
                 Checkin.user_id == user_id,
                 Checkin.season == season,
                 Checkin.season_year == season_year,
+                EmotionResult.is_latest == 1,
             )
             .all()
         )

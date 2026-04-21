@@ -60,7 +60,21 @@ class Checkin(Base):
     created_at = Column(Text, default=now_iso)
 
     user = relationship("User", back_populates="checkins")
-    emotion_result = relationship("EmotionResult", back_populates="checkin", uselist=False)
+
+    # All predictions ever made for this check-in (newest first).
+    emotion_results = relationship(
+        "EmotionResult",
+        back_populates="checkin",
+        order_by="EmotionResult.processed_at.desc()",
+    )
+
+    # Convenience: only the current (is_latest=1) prediction, or None.
+    latest_result = relationship(
+        "EmotionResult",
+        primaryjoin="and_(Checkin.checkin_id==EmotionResult.checkin_id, EmotionResult.is_latest==1)",
+        uselist=False,
+        viewonly=True,
+    )
 
     def to_dict(self):
         return {
@@ -86,9 +100,10 @@ class EmotionResult(Base):
     confidence = Column(Float, nullable=False)
     scores_json = Column(Text)  # JSON: {"happy": 0.7, "sad": 0.1, ...}
     model_version = Column(Text)
+    is_latest = Column(Integer, nullable=False, default=1)  # 1 = current, 0 = historical
     processed_at = Column(Text, default=now_iso)
 
-    checkin = relationship("Checkin", back_populates="emotion_result")
+    checkin = relationship("Checkin", back_populates="emotion_results")
 
     def to_dict(self):
         return {
@@ -98,11 +113,12 @@ class EmotionResult(Base):
             "confidence": self.confidence,
             "scores": json.loads(self.scores_json) if self.scores_json else {},
             "model_version": self.model_version,
+            "is_latest": self.is_latest,
             "processed_at": self.processed_at,
         }
 
     def __repr__(self):
-        return f"<EmotionResult(result_id={self.result_id}, emotion='{self.predicted_emotion}')>"
+        return f"<EmotionResult(result_id={self.result_id}, emotion='{self.predicted_emotion}', latest={self.is_latest})>"
 
 
 class SeasonalSummary(Base):
@@ -141,4 +157,4 @@ class SeasonalSummary(Base):
 
 Index("idx_checkins_user_season", Checkin.user_id, Checkin.season, Checkin.season_year)
 Index("idx_checkins_captured", Checkin.captured_at)
-Index("idx_emotion_results_checkin", EmotionResult.checkin_id)
+Index("idx_emotion_results_checkin_latest", EmotionResult.checkin_id, EmotionResult.is_latest)

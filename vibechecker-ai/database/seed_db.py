@@ -4,6 +4,7 @@ import json
 import random
 from datetime import datetime, timedelta
 from models import get_db, User, Checkin, EmotionResult, SeasonalSummary
+from db import get_season
 
 EMOTIONS = ["angry", "fear", "happy", "neutral", "sad", "surprise"]
 
@@ -13,16 +14,6 @@ def random_scores():
     raw = [random.random() for _ in EMOTIONS]
     total = sum(raw)
     return {emotion: round(score / total, 3) for emotion, score in zip(EMOTIONS, raw)}
-
-
-def get_season(month):
-    if month in (12, 1, 2):
-        return "winter"
-    if month in (3, 4, 5):
-        return "spring"
-    if month in (6, 7, 8):
-        return "summer"
-    return "fall"
 
 
 def seed():
@@ -77,6 +68,7 @@ def seed():
                     confidence=round(scores[predicted], 3),
                     scores_json=json.dumps(scores),
                     model_version="v0.1-test",
+                    is_latest=1,
                 )
                 db.add(result)
                 checkin_count += 1
