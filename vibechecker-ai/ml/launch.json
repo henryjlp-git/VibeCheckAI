@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Train Model",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/vibechecker-ai/ml/train.py",
+      "args": ["--epochs", "60", "--batch-size", "64"],
+      "cwd": "${workspaceFolder}/vibechecker-ai/ml",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Evaluate Model",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/vibechecker-ai/ml/evaluate.py",
+      "args": ["--checkpoint", "models/emotion_model_v1.0.pt", "--save-plot"],
+      "cwd": "${workspaceFolder}/vibechecker-ai/ml",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Test Inference",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/vibechecker-ai/ml/inference.py",
+      "args": ["data/test/happy/some_image.jpg"],
+      "cwd": "${workspaceFolder}/vibechecker-ai/ml",
+      "console": "integratedTerminal"
+    }
+  ]
+}
